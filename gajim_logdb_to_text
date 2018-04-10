@@ -1,0 +1,417 @@
+#!/usr/bin/env python
+
+import getopt
+import os
+import os.path
+import sqlite3
+import sys
+import time
+
+short_opts = "hjf"
+long_opts = [
+    "help",
+    "no-cache",
+    "no-fd-cache",
+]
+
+__name = "gajim_logdb_to_text"
+__version = "1.0.0"
+
+
+def usage():
+    """
+    Show usage information
+    :return: None
+    """
+    print("""%s %s
+Copyright (C) 2018 by Andreas Maus <maus@ypbind.de>
+This program comes with ABSOLUTELY NO WARRANTY.
+
+%s is distributed under the Terms of the GNU General
+Public License Version 3. (http://www.gnu.org/copyleft/gpl.html)
+
+Usage: %s [-h|--help] [-f|--no-fd-cache] [-j|--no-jid-cache] <gajim_log_db> <output_directory>
+
+  -h        This text.
+  --help
+  
+  -f                Do not cache open file descriptors. Default behavior is to keep a list of open output files
+  --no-fd-cache     and close them all when the conversion finnished instead of closeing and reopening the files every
+                    time a log message is appended. Usually the default setting will result in _much_ better write
+                    performance but the limit of open file descriptors (ulimit -n) must be set accordingly.
+
+  -j                Do not read all ID -> JID mappings into memory.
+  --no-jid-cache    Default behavior is to read the ID -> JID mapping from the database once and lookup JID information
+                    from memory instead of requesting it from the database. Usually this will result in much faster
+                    lookups (and reduce disk I/O on the database file) but may consume large amounts of memory for huge
+                    JID lists.
+ 
+""" % (__name, __version, __name, __name))
+
+
+def open_database_file(dbfile):
+    """
+    Open SQLite3 database file
+    :param dbfile: database file to open
+    :return: database handle or None on error
+    """
+    try:
+        handle = sqlite3.connect(database=dbfile)
+    except sqlite3.Error:
+        return None
+
+    return handle
+
+
+def read_jids_into_memory(db_handle):
+    """
+    Read JIDs from database handle into memory
+    :param db_handle: db handle
+    :return: dict of jids (key: id, value jid_data; jid_data is a dict of "jid":<jid>, "is_room":bool) or None on error
+    """
+    jid_map = {}
+    cursor = db_handle.cursor()
+
+    try:
+        cursor.execute("SELECT jid_id,jid,type FROM jids;")
+        result = cursor.fetchall()
+        for i in result:
+            # jid is defined with the UNIQUE constraint in the database table
+            jid_id = i[0]
+            jid = i[1]
+            _type = i[2]
+
+            if _type == 0:
+                is_room = False
+            else:
+                is_room = True
+
+            jid_map[jid_id] = {
+                "jid": jid,
+                "is_room": is_room,
+            }
+        cursor.close()
+        db_handle.commit()
+    except sqlite3.Error:
+        cursor.close()
+        db_handle.rollback()
+        return None
+
+    return jid_map
+
+
+def get_jid_from_db(db_handle, jid_id):
+    """
+    Return JID information for a given id from database
+    :param db_handle: database handle
+    :param jid_id: ID from database
+    :return: JID information (dict) or None on error
+    """
+    retval = {}
+    cursor = db_handle.cursor()
+
+    try:
+        query = (jid_id, )
+        cursor.execute("SELECT jid,type FROM jids WHERE jid_id=?;", query)
+        result = cursor.fetchall()
+        # jid is defined with the UNIQUE constraint in the database table, so there is _always_ a single match or none
+        # at all
+        if len(result) > 0:
+            jid = result[0][0]
+            _type = result[0][1]
+
+            if _type == 0:
+                is_room = False
+            else:
+                is_room = True
+
+            retval = {
+                "jid": jid,
+                "is_room": is_room,
+            }
+
+        cursor.close()
+        db_handle.commit()
+    except sqlite3.Error:
+        cursor.close()
+        db_handle.rollback()
+        return None
+
+    return retval
+
+
+def get_jid(db_handle, jid_id, jid_map):
+    """
+    Return JID information for a given id
+    :param db_handle: database handle, can be None if jid_map is set
+    :param jid_id: ID from database
+    :param jid_map: dict of JID mapping, None if no cacheing
+    :return: JID information (dict) or None on error
+    """
+    if jid_map is not None:
+        if jid_id in jid_map:
+            return jid_map[jid_id]
+        else:
+            # shouldn't happen because we have either all JIDs in memory or none at all
+            return {}
+    else:
+        if db_handle is not None:
+            jid_res = get_jid_from_db(db_handle=db_handle, jid_id=jid_id)
+            return jid_res
+        else:
+            return None
+
+
+def generate_output_filename(stamp, jid_data, contact_name):
+    """
+    Generate output filename
+    :param stamp: time stamp
+    :param jid_data: JID data
+    :param contact_name: contact name
+    :return: relative path to output file
+    """
+    #
+    # format will be:
+    #
+    # rooms/<room>/<%Y_%m_%d>.log - group chat
+    # rooms/<room>/<user>/<%Y_%m_%d>.log - direct message in MUC
+    # <jid>/<%Y_%m_%d>.log - direct message (Gajim stores the JID as bare JID in this case)
+    #
+    filename = time.strftime("%Y_%m_%d", time.localtime(stamp))
+    if jid_data["is_room"]:
+        room_name = jid_data["jid"].replace("@", "_at_")
+        if contact_name is None:
+            # contact name is NULL in the database when a direct message in MUC is logged
+            # in this case the stored JID is a full JID, extract the contact name from the resource part
+            # of this full JID (see XEP-0045)
+            parts = jid_data["jid"].split("/", 2)
+            room_name = parts[0]
+            # Slashes are not allowed in resource names
+            if len(parts) > 1:
+                contact_name = parts[1]
+
+                dirname = os.path.join("rooms", room_name, contact_name)
+
+            else:
+                # room status messages like "this room is not anonymous" are sent from the room to the room
+                # so the do _only_ have a bare JID and contact_name is None, skip them
+                return None
+
+        else:
+            dirname = os.path.join("rooms", room_name)
+    else:
+        # Gajim only stores the full JID for direct messages in MUC
+        if jid_data["jid"].find("/") > 0:
+            if contact_name is None:
+                # contact name is NULL in the database when a direct message in MUC is logged
+                # in this case the stored JID is a full JID, extract the contact name from the resource part
+                # of this full JID (see XEP-0045)
+                parts = jid_data["jid"].split("/", 2)
+                room_name = parts[0].replace("@", "_at_")
+                # Slashes are not allowed in resource names
+                contact_name = parts[1]
+
+                dirname = os.path.join("rooms", room_name, contact_name)
+            else:
+                dirname = os.path.join("rooms", room_name)
+        else:
+            dirname = jid_data["jid"].replace("@", "_at_")
+
+    return os.path.join(dirname, filename)
+
+
+def close_fds(fdmap):
+    """
+    Close all file descriptors in file descriptor map
+    :param fdmap: dict
+    :return: None
+    """
+    for fn in fdmap.keys():
+        try:
+            if fdmap[fn] is not None:
+                fdmap[fn].close()
+        except:
+            # closing a file will only fail if:
+            #
+            # * it isn't an open file descriptor
+            # * close() was interrupted by a signal
+            # * an I/O error occured
+            #
+            # the first point should never happen, as for the other points there is nothing we can do
+            pass
+
+        fdmap[fn] = None
+
+
+def write_messages(db_handle, jid_map, out_dir, cache_fd=True):
+    """
+    Write message from database to output directory
+    :param db_handle: database handle
+    :param jid_map: map of JIDids to JID information
+    :param out_dir: output directory to dump data to
+    :param cache_fd: bool, if True (default) keep track of open file descriptors and close them when we are done
+                     the number of open files (ulimit -n) should be set accordingly.
+                     If cache_fd is false output files will be opened, written and closed immediately which will
+                     result in poor write performance for large logs but isn't affected by the limit on open
+                     file descriptors
+    :return: None
+    """
+    fd_map = {}
+    cursor = db_handle.cursor()
+
+    try:
+        #
+        # The database table logs is defined as:
+        #
+        # Field         Description
+        #
+        # log_line_id	the ID given to logged message
+        #
+        # jid_id	    the jid_id (programmaticaly FK to the one in jids_table)
+        #
+        # contact_name	holds the nickname (has non-empty data only for group chat messages and group chat status
+        #               changes (in the future when XMPP gets the concept of desired nickname for chat/normal messages,
+        #               we can store that here)
+        #
+        # time	        holds int value of unixtime for logged message
+        #
+        # kind	        holds int value that represents 'status' (value 0), 'gcstatus' (value 1), 'gc_msg' (value 2),
+        #               'single_msg_recv' (value 3), 'chat_msg_recv' (value 4), 'single_msg_sent' (value 5),
+        #               'chat_msg_sent' (value 6), 'error' (value 7). For the first three (status, gcstatus, gc_msg)
+        #               we only receive; Gajim logs our gc message the minute we receive it and that is why you don't
+        #               have gc_msg_recv gc_msg sent. As to status well we don't log our status changes because we
+        #               don't care, so it's too much to say gc_status_recv as we don't have gc_status_sent
+        #
+        # show	        holds int value that represents show and has non-empty data only for status changes
+        #               'online' (value 0), 'chat' (value 1), 'away' (value 2), 'xa' (value 3), 'dnd' (value 4),
+        #               'offline' (value 5)
+        #
+        # message       holds the message which is normaly what one of the users said, unless we have a status change
+        #               with status message provided in which case messages holds the status message
+        #
+        # subject	    holds a possible subject of a message
+
+        # we are not interested in status changes
+        cursor.execute("SELECT jid_id, contact_name, time, message, kind FROM logs WHERE kind>1 AND kind<7;")
+        result = cursor.fetchall()
+        for res in result:
+            jid_id = res[0]
+            contact_name = res[1]
+            timestamp = res[2]
+            message = res[3]
+            kind = res[4]
+
+            jid_data = get_jid(db_handle=db_handle, jid_id=jid_id, jid_map=jid_map)
+            if jid_data is None or len(jid_data) == 0:
+                sys.stderr.write("Warning: Unable to lookup JID ID %u, discarding message\n" % (jid_id,))
+                continue
+
+            output_file = generate_output_filename(stamp=timestamp, jid_data=jid_data, contact_name=contact_name)
+            # output_file is None for room internal messages, e.g. "This room is not anonymous"
+            if output_file is None:
+                continue
+
+            output_file = os.path.join(out_dir, output_file)
+
+            # to improve write speed (by a large margin) we do not close the file handles after writing a line
+            # but we store a lookup table for file handles, write to them and close them all when we are done
+            if output_file not in fd_map:
+                try:
+                    if not os.path.isdir(os.path.dirname(output_file)):
+                        os.makedirs(os.path.dirname(output_file))
+
+                    fd_map[output_file] = open(output_file, "at")
+                except IOError as ioe:
+                    sys.stderr.write("Error: Can't open %s for writing: %s\n" % (output_file, ioe.strerror))
+                    close_fds(fdmap=fd_map)
+                    cursor.close()
+                    db_handle.rollback()
+                    return None
+                except OSError as ose:
+                    sys.stderr.write("Error: Can't open %s for writing: %s\n" % (output_file, ose.strerror))
+                    close_fds(fdmap=fd_map)
+                    cursor.close()
+                    db_handle.rollback()
+                    return None
+
+            timestr = time.strftime("%H:%M:%S", time.localtime(timestamp))
+            if jid_data["is_room"]:
+                if contact_name is None:
+                    parts = jid_data["jid"].split("/", 2)
+                    contact_name = "_slash_".join(parts[1:], )
+            else:
+                contact_name = jid_data["jid"]
+
+            # replace (receiving) jid with "me" for chat_msg_sent events
+            if kind == 6:
+                contact_name = "me"
+
+            fd_map[output_file].write("%s - %s: %s\n" % (timestr, contact_name, message))
+
+            # close file immediately and remove it from map
+            if not cache_fd:
+                fd_map[output_file].close()
+                fd_map.pop(output_file, None)
+
+        close_fds(fdmap=fd_map)
+        cursor.close()
+        db_handle.commit()
+    except sqlite3.Error as sqle:
+        close_fds(fd_map)
+        cursor.close()
+        db_handle.rollback()
+        sys.stderr.write("Error: %s\n" % (str(sqle), ))
+        return None
+
+
+if __name__ == "__main__":
+    # Read JIDs into memory for faster lookup
+    cached = True
+    jid_cache = None
+    fd_cache = True
+
+    try:
+        options, trailing = getopt.getopt(sys.argv[1:], shortopts=short_opts, longopts=long_opts)
+    except getopt.GetoptError as ge:
+        sys.stderr.write("Error: %s\n" % (str(ge), ))
+        sys.exit(1)
+
+    for opt, arg in options:
+        if opt in ("-h", "--help"):
+            usage()
+            sys.exit(0)
+        elif opt in ("-j", "--no-cache"):
+            cached = False
+        elif opt in ("-f", "--no-fd-cache"):
+            fd_cache = False
+
+    if len(trailing) != 2:
+        sys.stderr.write("Error: Missing parameters\n\n")
+        usage()
+        sys.exit(1)
+
+    logdb = trailing[0]
+    outdir = trailing[1]
+
+    if not os.access(logdb, os.R_OK):
+        sys.stderr.write("Error: Can't open %s for reading\n" % (logdb, ))
+        sys.exit(2)
+
+    if not os.access(outdir, os.W_OK | os.X_OK):
+        sys.stderr.write("Error: Can't open %s for writing or it isn't a directory\n" % (outdir, ))
+        sys.exit(2)
+
+    db = open_database_file(logdb)
+
+    if cached:
+        print(" * Reading JID from database into memory")
+        jid_cache = read_jids_into_memory(db_handle=db)
+        if jid_cache is None:
+            sys.stderr.write("Error: Can't read JIDs from database file %s\n" % (logdb, ))
+            sys.exit(3)
+
+    print(" * Writing messages to files")
+    write_messages(db, jid_map = jid_cache, out_dir=outdir, cache_fd=fd_cache)
+
+    db.close()
+    sys.exit(0)
