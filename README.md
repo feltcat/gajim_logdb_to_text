@@ -5,20 +5,20 @@ Convert Gajims chat log database file into text files
 [Gajim](https://gajim.org/) stores the chat log in an [SQLite](https://sqlite.org) database format in `${HOME}/.gajim/logs.db`
 For easier searching and viewing chat logs should be stored in text files.
 
-[gajim_logdb_to_text](https://git.ypbind.de/cgit/gajim_logdb_to_text/) will read chat logs from the SQLite database file and write the logs
+[gajim\_logdb\_to\_text](https://git.ypbind.de/cgit/gajim_logdb_to_text/) will read chat logs from the SQLite database file and write the logs
 into text files inside a directory
 
 ---
 
 ## Requirements
 ### Python
-[gajim_logdb_to_text](https://git.ypbind.de/cgit/gajim_logdb_to_text/) is written in Python, so Python >=2.6 is required.
+[gajim\_logdb\_to\_text](https://git.ypbind.de/cgit/gajim_logdb_to_text/) is written in Python, so Python >=2.6 is required.
 The neccessary `sqlite3` Python module is included in the Python "vanilla" installation.
 
 ---
 
 ## Command line parameters
-gajim_logdb_to_text supports the following command line parameters:
+gajim\_logdb\_to\_text supports the following command line parameters:
 
   * `-h` or `--help` - shows help text, usage and copyright/license information
   * `-f` or `--no-fd-cache` - disable cacheing of open file descriptors. Default behavior is to keep a list of open output files and close them all when the conversion finnished instead of closeing and reopening the files every time a log message is appended. Usually the default setting will result in _much_ better write performance but the limit of open file descriptors (ulimit -n) must be set accordingly.
