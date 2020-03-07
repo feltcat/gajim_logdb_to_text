@@ -1,3 +1,7 @@
+**_Note:_** Because I'm running my own servers for serveral years, main development is done at at https://git.ypbind.de/cgit/gajim_logdb_to_text/
+
+----
+
 Convert Gajims chat log database file into text files
 ==================================================================
 
