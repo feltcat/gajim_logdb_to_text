@@ -1,4 +1,4 @@
-**__Note__**: Because I'm running my own servers for serveral years, all data and repositories are hosted there at <https://git.ypbind.de/cgit/gajim_logdb_to_text/about/>
+**__Note__**: Because I'm running my own servers for several years, all data and repositories are hosted there at <https://git.ypbind.de/cgit/gajim_logdb_to_text/about/>
 
 ---
 
@@ -29,7 +29,7 @@ gajim\_logdb\_to\_text supports the following command line parameters:
   * `-j` or `--no-jid-cache` - disables reading of the ID -> JID mapping from the database once and lookup JID information from memory instead of requesting it from the database. Usually this will result in much faster lookups (and reduce disk I/O on the database file) but may consume large amounts of memory for huge JID lists.
 
 Mandatory arguments are `<name_of_gajim_logs_db>` and `<name_of_output_directory>`, the output directory must already exists.
-The name of the output files is `<year>_<moth>_<day>.log` and will be located in:
+The name of the output files is `<year>_<month>_<day>.log` and will be located in:
 
   * `<output_dir>/rooms/<room_name>/` - for messages in MUC chat
   * `<output_dir>/rooms/<room_name>/<member>/` - for direct messages from MUC member `<member>`

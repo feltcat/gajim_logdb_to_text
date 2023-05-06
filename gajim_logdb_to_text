@@ -194,7 +194,7 @@ def generate_output_filename(stamp, jid_data, contact_name):
 
             else:
                 # room status messages like "this room is not anonymous" are sent from the room to the room
-                # so the do _only_ have a bare JID and contact_name is None, skip them
+                # so they do _only_ have a bare JID and contact_name is None, skip them
                 return None
 
         else:
